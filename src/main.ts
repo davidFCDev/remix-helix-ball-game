@@ -1,7 +1,6 @@
 const Phaser = (window as any).Phaser;
 import { getResponsiveDimensions } from "./config/GameSettings";
 import HelixScene from "./scenes/HelixScene";
-import { PreloadScene } from "./scenes/PreloadScene";
 
 // SDK mock is automatically initialized by the framework (dev-init.ts)
 
@@ -21,7 +20,7 @@ const config: Phaser.Types.Core.GameConfig = {
     height: dimensions.height,
   },
   transparent: true, // Make Phaser canvas transparent
-  scene: [PreloadScene, HelixScene],
+  scene: [HelixScene],
   physics: {
     default: "arcade",
   },

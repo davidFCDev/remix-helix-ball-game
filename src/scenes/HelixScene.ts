@@ -32,9 +32,14 @@ export default class HelixScene extends Phaser.Scene {
   private jumpStrength: number = 0.35;
   private isGameActive: boolean = true;
   private isGameStarting: boolean = true;
+  private isTapToStart: boolean = false;
+  private assetsReady: boolean = false;
+  private pendingStart: boolean = false;
   private startTimer: number = 0;
   private startText!: Phaser.GameObjects.Text;
   private startOverlay!: Phaser.GameObjects.Graphics;
+  private tapToStartOverlay!: Phaser.GameObjects.Graphics;
+  private tapToStartText!: Phaser.GameObjects.Text;
   private score: number = 0;
   private comboCount: number = 0;
   private scoreText!: Phaser.GameObjects.Text;
@@ -59,9 +64,9 @@ export default class HelixScene extends Phaser.Scene {
   private beepSound!: Phaser.Sound.BaseSound;
   private jumpSound!: Phaser.Sound.BaseSound;
   private currentMusic!: Phaser.Sound.BaseSound;
-  private musicTracks: string[] = ["music1", "music2", "music3"];
-  private premiumMusicTracks: string[] = []; // Removed for faster loading
-  private chaosMusicTracks: string[] = ["chaos1", "chaos2", "chaos3"]; // Chaos Mode exclusive
+  private musicTracks: string[] = ["chaos1"];
+  private premiumMusicTracks: string[] = [];
+  private chaosMusicTracks: string[] = ["chaos1"]; // Single track for faster loading
   private isFirstGame: boolean = true; // First game uses guaranteed tracks
   private extraMusicLoaded: boolean = false; // Track if extra music has been loaded
   private playerHighScore: number = 0; // Player's high score for premium content
@@ -85,10 +90,8 @@ export default class HelixScene extends Phaser.Scene {
 
   // Game Over UI elements to clean up on restart
   private gameOverUIElements: Phaser.GameObjects.GameObject[] = [];
-
-  // Try Again overlay
-  private tryAgainUsed: boolean = false;
-  private tryAgainUIElements: Phaser.GameObjects.GameObject[] = [];
+  // Live combo streak display
+  private comboStreakText: Phaser.GameObjects.Text | null = null;
 
   // Trail effect particles (kept for future use)
   private trailParticles: THREE.Mesh[] = [];
@@ -101,6 +104,7 @@ export default class HelixScene extends Phaser.Scene {
   private lastTrailTime: number = 0; // Throttle trail creation
   private lastSparkTime: number = 0; // Throttle spark creation
   private lastFireTime: number = 0; // Throttle fire trail creation
+  private trailColorIndex: number = 0; // Cycles through neon palette
 
   // Ball Selector UI
   private ballSelectorBtn!: Phaser.GameObjects.Container;
@@ -192,7 +196,7 @@ export default class HelixScene extends Phaser.Scene {
     chaosMode?: boolean;
   }) {
     // Reset chaos mode first (important for scene restarts)
-    this.isChaosMode = false;
+    this.isChaosMode = true; // Default to chaos mode
     this.trailParticles = []; // Reset trail particles
 
     if (data?.testRank) {
@@ -242,8 +246,10 @@ export default class HelixScene extends Phaser.Scene {
 
     const width = rect.width;
     const height = rect.height;
-    // Balanced FOV (68) for visibility and mobile performance
-    this.camera = new THREE.PerspectiveCamera(68, width / height, 0.1, 1000);
+    // Wider FOV on portrait/mobile screens so the scene feels more open
+    const isPortrait = height > width;
+    const fov = isPortrait ? 80 : 68;
+    this.camera = new THREE.PerspectiveCamera(fov, width / height, 0.1, 1000);
     this.camera.position.set(0, 5, 11);
     this.camera.lookAt(0, -1, 0);
 
@@ -253,6 +259,10 @@ export default class HelixScene extends Phaser.Scene {
     });
     this.threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio
     this.threeRenderer.setSize(rect.width, rect.height);
+  }
+
+  preload() {
+    // Intentionally empty — all assets load in background via loadAllAssets()
   }
 
   create() {
@@ -366,8 +376,7 @@ export default class HelixScene extends Phaser.Scene {
       this.createCyberpunkGrid();
     }
 
-    this.beepSound = this.sound.add("beep", { volume: 0.3 }); // Low volume for countdown beeps
-    this.jumpSound = this.sound.add("jump", { volume: 0.3 }); // Low volume so music predominates
+    // Sounds initialized in loadAllAssets() once('complete') callback
 
     // UI Setup
     this.createUI();
@@ -402,42 +411,55 @@ export default class HelixScene extends Phaser.Scene {
     // SDK Event Listeners
     this.setupSDKListeners();
 
-    // Load extra music in background (non-blocking)
-    this.loadExtraMusic();
+    // Load all assets in background (non-blocking)
+    this.loadAllAssets();
 
-    // Start the game logic
+    // Start the game logic (shows TAP TO START immediately)
     this.restartGame();
+  }
+
+  private loadAllAssets(): void {
+    // Essential audio
+    this.load.audio(
+      "beep",
+      "https://remix.gg/blob/13e738d9-e135-454e-9d2a-e456476a0c5e/beep-aZS0fjcqYMF02tbEaXNicU1ZINgbFv.mp3?mLta",
+    );
+    this.load.audio(
+      "jump",
+      "https://remix.gg/blob/13e738d9-e135-454e-9d2a-e456476a0c5e/jump-dl6fQQe9R850MJre81hlFTMQeSeEdt.mp3?x2xm",
+    );
+    // Single music track only — faster load
+    this.load.audio(
+      "chaos1",
+      "https://remix.gg/blob/13e738d9-e135-454e-9d2a-e456476a0c5e/chaos1-XUTPuodX90SvcqBFbUEoVmRPrnvekZ.mp3?SItV",
+    );
+
+    this.load.once("complete", () => {
+      // Initialize sounds now that assets are ready
+      this.beepSound = this.sound.add("beep", { volume: 0.3 });
+      this.jumpSound = this.sound.add("jump", { volume: 0.3 });
+      this.extraMusicLoaded = true;
+      this.assetsReady = true;
+
+      // If user already tapped, start the countdown now
+      if (this.pendingStart) {
+        this.pendingStart = false;
+        this.tapToStartText.setText("TAP TO START");
+        this.beginCountdown();
+      }
+    });
+
+    this.load.on("loaderror", (file: any) => {
+      console.warn("⚠️ Error cargando audio:", file.key);
+    });
+
+    this.load.start();
   }
 
   private loadExtraMusic(): void {
     if (this.extraMusicLoaded) return;
-
-    console.log("🎵 Cargando música extra en background...");
-
-    // Load additional tracks in background - won't block gameplay
-    this.load.audio(
-      "music2",
-      "https://remix.gg/blob/13e738d9-e135-454e-9d2a-e456476a0c5e/Music2-e5yvNmydcY93DXLREewH08duLtpKHW.mp3?CqEO",
-    );
-    this.load.audio(
-      "music3",
-      "https://remix.gg/blob/13e738d9-e135-454e-9d2a-e456476a0c5e/Music3-j3DjCMhHxGIB59oCtKifBJHGWlAs5V.mp3?4xTa",
-    );
-    this.load.audio(
-      "chaos2",
-      "https://remix.gg/blob/13e738d9-e135-454e-9d2a-e456476a0c5e/chaos2-NLlm46zDRJmhhQCmVFqUmuUdabQZa6.mp3?K4pz",
-    );
-    this.load.audio(
-      "chaos3",
-      "https://remix.gg/blob/13e738d9-e135-454e-9d2a-e456476a0c5e/chaos3-PAJHXFylcKGz6pSdO5MtPhfnz4v81n.mp3?J8of",
-    );
-
-    this.load.on("complete", () => {
-      console.log("✅ Música extra cargada");
-      this.extraMusicLoaded = true;
-    });
-
-    this.load.start();
+    // Extra music is now loaded upfront in loadAllAssets()
+    this.extraMusicLoaded = true;
   }
 
   createStripedTexture() {
@@ -592,6 +614,37 @@ export default class HelixScene extends Phaser.Scene {
 
     this.scoreContainer.add(this.scoreText);
     this.scoreContainer.setVisible(false); // Hide initially
+
+    // Tap to Start overlay
+    this.tapToStartOverlay = this.add.graphics();
+    this.tapToStartOverlay.fillStyle(0x000000, 0.85);
+    this.tapToStartOverlay.fillRect(0, 0, width, height);
+    this.tapToStartOverlay.setDepth(199);
+    this.tapToStartOverlay.setVisible(false);
+
+    this.tapToStartText = this.add
+      .text(width / 2, height / 2, "TAP TO START", {
+        fontSize: "38px",
+        color: "#FFFFFF",
+        fontFamily: "'Fredoka One', 'Arial Black', Arial, sans-serif",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 6,
+        align: "center",
+      })
+      .setOrigin(0.5)
+      .setDepth(200)
+      .setVisible(false);
+
+    // Pulsating animation for tap text
+    this.tweens.add({
+      targets: this.tapToStartText,
+      alpha: 0.4,
+      duration: 700,
+      ease: "Sine.easeInOut",
+      yoyo: true,
+      repeat: -1,
+    });
 
     // Start Overlay
     this.startOverlay = this.add.graphics();
@@ -853,6 +906,8 @@ export default class HelixScene extends Phaser.Scene {
 
     this.threeRenderer.setSize(width, height);
     this.camera.aspect = width / height;
+    // Keep FOV in sync with orientation
+    this.camera.fov = height > width ? 80 : 68;
     this.camera.updateProjectionMatrix();
 
     const threeCanvas = this.threeRenderer.domElement;
@@ -959,6 +1014,23 @@ export default class HelixScene extends Phaser.Scene {
 
     for (let i = 0; i < platformCount; i++) {
       const yPos = -2 - i * 4;
+
+      // Boss Platform — challenge platform (no gap, hit all target gems to destroy)
+      if (i >= 30 && Math.random() < 0.12) {
+        // Remove any power-ups floating too close above this boss (from the previous platform)
+        for (let j = this.powerUps.length - 1; j >= 0; j--) {
+          const pu = this.powerUps[j];
+          if (pu.position.y > yPos && pu.position.y < yPos + 5) {
+            this.tower.remove(pu);
+            this.powerUps.splice(j, 1);
+          }
+        }
+        const boss = this.createBossPlatformMesh(yPos);
+        this.tower.add(boss);
+        this.platforms.push(boss);
+        if (yPos < this.lowestPlatformY) this.lowestPlatformY = yPos;
+        continue;
+      }
 
       // 1. Generate Gaps
       const numGaps = i > 10 && Math.random() > 0.7 ? 2 : 1;
@@ -1330,6 +1402,24 @@ export default class HelixScene extends Phaser.Scene {
 
   // Generate a single new platform at a specific Y position
   spawnNewPlatform(yPos: number) {
+    // Boss Platform — challenge platform
+    if (this.platformIdCounter >= 30 && Math.random() < 0.12) {
+      // Remove any power-ups floating too close above this boss (from the previous spawn)
+      for (let j = this.powerUps.length - 1; j >= 0; j--) {
+        const pu = this.powerUps[j];
+        if (pu.position.y > yPos && pu.position.y < yPos + 5) {
+          this.tower.remove(pu);
+          this.powerUps.splice(j, 1);
+        }
+      }
+      const boss = this.createBossPlatformMesh(yPos);
+      this.tower.add(boss);
+      this.platforms.push(boss);
+      this.platformIdCounter++;
+      this.lowestPlatformY = yPos;
+      return;
+    }
+
     // Platform colors - based on mode (Chaos or Classic)
     let platformColors: number[];
     if (this.isChaosMode) {
@@ -1716,42 +1806,46 @@ export default class HelixScene extends Phaser.Scene {
     });
     this.gameOverUIElements = [];
 
-    // Clean up Try Again overlay
-    this.destroyTryAgainUI();
-    this.tryAgainUsed = false;
-
     // Audio Reset
     if (this.currentMusic) {
       this.currentMusic.stop();
+      this.currentMusic = null;
     }
 
-    // Choose music track
-    let selectedTrack: string;
-    if (this.isFirstGame) {
-      // First game: use guaranteed loaded tracks (music1 or chaos1)
-      selectedTrack = this.isChaosMode ? "chaos1" : "music1";
-      this.isFirstGame = false;
-    } else {
-      // Subsequent games: random from available (loaded) tracks
-      const availableTracks = this.getAvailableMusicTracks();
-      selectedTrack =
-        availableTracks[Math.floor(Math.random() * availableTracks.length)];
-    }
+    // Show "Tap to Start" — actual countdown begins on tap
+    this.isGameActive = false;
+    this.isGameStarting = false;
+    this.isTapToStart = true;
+    this.startText.setVisible(false);
+    this.startOverlay.setVisible(false);
+    this.tapToStartOverlay.setVisible(true);
+    this.tapToStartText.setVisible(true);
+    this.tapToStartText.setAlpha(1);
 
-    this.currentMusic = this.sound.add(selectedTrack, {
-      volume: 0,
-      loop: true,
+    this.input.once("pointerdown", () => {
+      if (!this.isTapToStart) return;
+      this.isTapToStart = false;
+      this.tapToStartOverlay.setVisible(false);
+      this.tapToStartText.setVisible(false);
+      this.unlockAudioContext();
+      // Unlock Phaser's WebAudio context explicitly (critical for mobile/WebView)
+      try {
+        const phaserCtx = (this.sound as any).context;
+        if (phaserCtx && phaserCtx.state === "suspended") {
+          phaserCtx.resume().catch(() => {});
+        }
+      } catch (_) {}
+
+      if (this.assetsReady) {
+        this.beginCountdown();
+      } else {
+        // Assets still loading — show feedback and start when ready
+        this.pendingStart = true;
+        this.tapToStartText.setText("Loading...");
+        this.tapToStartText.setVisible(true);
+        this.tapToStartOverlay.setVisible(true);
+      }
     });
-    this.currentMusic.play();
-    // Beep will be played in update loop
-
-    this.isGameActive = true;
-    this.isGameStarting = true;
-    this.startTimer = 0;
-    this.startText.setVisible(true);
-    this.startText.setText(""); // Start empty
-    this.startOverlay.setVisible(true);
-    this.startOverlay.setAlpha(1);
 
     this.score = 0;
     this.comboCount = 0;
@@ -1788,6 +1882,57 @@ export default class HelixScene extends Phaser.Scene {
     this.particles = [];
 
     this.createPlatforms();
+  }
+
+  private beginCountdown() {
+    this.tapToStartOverlay.setVisible(false);
+    this.tapToStartText.setVisible(false);
+
+    // Start music now that assets are guaranteed loaded
+    if (this.currentMusic) {
+      this.currentMusic.stop();
+      this.currentMusic = null;
+    }
+    const selectedTrack = this.isChaosMode
+      ? this.isFirstGame
+        ? "chaos1"
+        : this.getAvailableMusicTracks()[
+            Math.floor(Math.random() * this.getAvailableMusicTracks().length)
+          ]
+      : this.isFirstGame
+        ? "music1"
+        : this.getAvailableMusicTracks()[
+            Math.floor(Math.random() * this.getAvailableMusicTracks().length)
+          ];
+    this.isFirstGame = false;
+    this.currentMusic = this.sound.add(selectedTrack, {
+      volume: 0,
+      loop: true,
+    });
+    // Ensure Phaser's AudioContext is running before playing (mobile fix)
+    const pCtx = (this.sound as any).context;
+    if (pCtx && pCtx.state === "suspended") {
+      pCtx
+        .resume()
+        .then(() => {
+          if (this.currentMusic && !(this.currentMusic as any).isPlaying) {
+            this.currentMusic.play();
+          }
+        })
+        .catch(() => {
+          this.currentMusic?.play();
+        });
+    } else {
+      this.currentMusic.play();
+    }
+
+    this.isGameActive = true;
+    this.isGameStarting = true;
+    this.startTimer = 0;
+    this.startText.setVisible(true);
+    this.startText.setText("");
+    this.startOverlay.setVisible(true);
+    this.startOverlay.setAlpha(1);
   }
 
   update(time: number, delta: number) {
@@ -1834,17 +1979,17 @@ export default class HelixScene extends Phaser.Scene {
         } else if (this.startTimer < initialDelay + stepTime) {
           if (this.startText.text !== "READY") {
             this.startText.setText("READY");
-            this.beepSound.play();
+            this.beepSound?.play();
           }
         } else if (this.startTimer < initialDelay + stepTime * 2) {
           if (this.startText.text !== "STEADY") {
             this.startText.setText("STEADY");
-            this.beepSound.play();
+            this.beepSound?.play();
           }
         } else {
           if (this.startText.text !== "GO!") {
             this.startText.setText("GO!");
-            this.beepSound.play();
+            this.beepSound?.play();
           }
           // Fade out overlay in the last step
           const timeInGo = this.startTimer - (initialDelay + stepTime * 2);
@@ -1931,6 +2076,31 @@ export default class HelixScene extends Phaser.Scene {
         // Track visibility state for collision
         platform.userData.isCurrentlyVisible = opacity > 0.4;
       }
+
+      // Boss platform: animate target gems and outer glow ring
+      if (platform.userData.isBossPlatform) {
+        platform.userData.bossTime += 0.05 * deltaMultiplier;
+        const bt = platform.userData.bossTime;
+        for (const target of platform.userData.bossTargets) {
+          if (target.destroyed) continue;
+          if (target.arcMesh) {
+            const mat = target.arcMesh.material as THREE.MeshBasicMaterial;
+            mat.opacity = 0.55 + 0.45 * Math.sin(bt * 4 + target.phaseOffset);
+          }
+          if (target.indicatorMesh) {
+            target.indicatorMesh.position.z =
+              this.platformThickness +
+              0.7 +
+              0.18 * Math.sin(bt * 5 + target.phaseOffset);
+            target.indicatorMesh.rotation.z += 0.03 * deltaMultiplier;
+          }
+        }
+        if (platform.userData.glowRingMesh) {
+          const glowMat = platform.userData.glowRingMesh
+            .material as THREE.MeshBasicMaterial;
+          glowMat.opacity = 0.3 + 0.3 * Math.sin(bt * 2.5);
+        }
+      }
     }
 
     // Update Power Ups (frame-independent)
@@ -1971,39 +2141,53 @@ export default class HelixScene extends Phaser.Scene {
       }
     }
 
-    // Chaos Mode Trail Effect - Smooth glowing neon trail (throttled)
-    if (this.isChaosMode && this.isGameActive && !this.isGameStarting) {
+    // Ball trail effect — layered multicolor neon glow (throttled)
+    if (this.isGameActive && !this.isGameStarting) {
       const now = time;
-      // Throttle trail creation to max ~20 per second instead of every frame
-      // Also limit max particles to prevent memory issues
-      if (now - this.lastTrailTime > 50 && this.particles.length < 60) {
+      if (now - this.lastTrailTime > 32 && this.particles.length < 80) {
         this.lastTrailTime = now;
 
-        // Neon trail colors matching cyberpunk theme
-        const chaosTrailColors = [0x00ff00, 0xff00ff, 0xffff00, 0x00ffff]; // Green, Magenta, Yellow, Cyan
-        const trailColor =
-          chaosTrailColors[Math.floor(Math.random() * chaosTrailColors.length)];
+        // Cycle through 4 cyberpunk neon colors deterministically (no random)
+        const neonPalette = [0x00ffff, 0xff00ff, 0xffff00, 0x00ff88];
+        const trailColor = neonPalette[this.trailColorIndex % 4];
+        this.trailColorIndex++;
 
-        // Create smooth glowing sprite trail - use cached texture
-        const trailMat = new THREE.SpriteMaterial({
+        // Outer glow — neon color, large halo
+        const outerMat = new THREE.SpriteMaterial({
           map: this.cachedGlowTexture,
           color: trailColor,
           transparent: true,
-          opacity: 0.6,
+          opacity: 0.28,
           blending: THREE.AdditiveBlending,
           depthWrite: false,
         });
-        const trail = new THREE.Sprite(trailMat);
-        trail.scale.set(0.6, 0.6, 1); // Smaller, finer trail
-        trail.position.copy(this.ball.position);
-        // Slight offset behind the ball
-        trail.position.y += 0.1;
-
-        this.threeScene.add(trail);
+        const outer = new THREE.Sprite(outerMat);
+        outer.scale.set(1.4, 1.4, 1);
+        outer.position.copy(this.ball.position);
+        this.threeScene.add(outer);
         this.particles.push({
-          mesh: trail,
-          velocity: new THREE.Vector3(0, 0.01, 0),
-          life: 0.5,
+          mesh: outer,
+          velocity: new THREE.Vector3(0, 0, 0),
+          life: 0.7,
+        });
+
+        // Core glow — white hot centre
+        const coreMat = new THREE.SpriteMaterial({
+          map: this.cachedGlowTexture,
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.5,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        const core = new THREE.Sprite(coreMat);
+        core.scale.set(0.55, 0.55, 1);
+        core.position.copy(this.ball.position);
+        this.threeScene.add(core);
+        this.particles.push({
+          mesh: core,
+          velocity: new THREE.Vector3(0, 0, 0),
+          life: 0.45,
         });
       }
     }
@@ -2158,7 +2342,7 @@ export default class HelixScene extends Phaser.Scene {
 
       if (this.ballVelocity < 0) {
         if (this.ball.position.y >= topSurfaceY && nextY <= topSurfaceY) {
-          if (this.isSuperSmash) {
+          if (this.isSuperSmash && !platform.userData.isBossPlatform) {
             this.destroyPlatform(platform, i);
             const pointsPerPlatform = this.isChaosMode ? 2 : 1;
             this.score += pointsPerPlatform;
@@ -2176,6 +2360,55 @@ export default class HelixScene extends Phaser.Scene {
               this.resolveCombo();
             }
             collided = true;
+          } else if (platform.userData.isBossPlatform) {
+            // Boss Platform neutralises super smash — cancel it so ball gets a normal bounce
+            if (this.isSuperSmash) {
+              this.isSuperSmash = false;
+              this.platformsToSmash = 0;
+            }
+            // Boss Platform — multi-hit mechanic: must hit all target gems to break
+            const bossResult = this.checkBossCollision(platform);
+            if (bossResult.type === "danger") {
+              if (this.isShieldActive) {
+                this.isShieldActive = false;
+                this.shieldTimer = 0;
+                if (this.shieldVisual) {
+                  const mat = this.shieldVisual
+                    .material as THREE.MeshBasicMaterial;
+                  mat.opacity = 1.0;
+                  this.createExplosion(
+                    this.ball.position.y,
+                    0x00ffff,
+                    12,
+                    true,
+                  );
+                  this.threeScene.remove(this.shieldVisual);
+                  this.shieldVisual = null;
+                }
+                this.ballVelocity = this.isChaosMode
+                  ? this.chaosJumpStrength
+                  : this.jumpStrength;
+                this.ball.position.y = topSurfaceY;
+              } else {
+                this.gameOverSplatter(topSurfaceY);
+                return;
+              }
+            } else if (bossResult.type === "target") {
+              this.hitBossTarget(
+                platform,
+                bossResult.targetIndex,
+                i,
+                topSurfaceY,
+              );
+            } else {
+              // Safe zone — bounce without scoring
+              this.ballVelocity = this.isChaosMode
+                ? this.chaosJumpStrength
+                : this.jumpStrength;
+              this.ball.position.y = topSurfaceY;
+              this.jumpSound?.play();
+            }
+            collided = true;
           } else {
             const collisionResult = this.checkCollision(platform);
 
@@ -2184,7 +2417,7 @@ export default class HelixScene extends Phaser.Scene {
                 ? this.chaosJumpStrength
                 : this.jumpStrength;
               this.ball.position.y = topSurfaceY;
-              this.jumpSound.play();
+              this.jumpSound?.play();
               this.resolveCombo();
               collided = true;
             } else if (collisionResult === "danger") {
@@ -2230,6 +2463,7 @@ export default class HelixScene extends Phaser.Scene {
               this.score += pointsPerPlatform;
               this.comboCount++;
               this.scoreText.setText(this.score.toString());
+              this.updateComboStreak(this.comboCount);
             }
           }
         }
@@ -3055,9 +3289,9 @@ export default class HelixScene extends Phaser.Scene {
     count: number,
     hasShockwave: boolean = true,
   ) {
-    const texture = this.createGlowTexture();
+    // Reuse cached texture — avoids creating a new canvas per call
     const material = new THREE.SpriteMaterial({
-      map: texture,
+      map: this.cachedGlowTexture,
       color: color,
       transparent: true,
       blending: THREE.AdditiveBlending,
@@ -3090,12 +3324,11 @@ export default class HelixScene extends Phaser.Scene {
     }
 
     if (hasShockwave) {
-      // Doodle style ring - thick black outline
-      const ringGeo = new THREE.RingGeometry(1.8, 2.2, 24);
+      const ringGeo = new THREE.RingGeometry(1.8, 2.2, 16);
       const ringMat = new THREE.MeshBasicMaterial({
         color: 0x000000,
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.85,
         side: THREE.DoubleSide,
       });
       const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -3105,7 +3338,7 @@ export default class HelixScene extends Phaser.Scene {
       this.particles.push({
         mesh: ring,
         velocity: new THREE.Vector3(0, 0, 0),
-        life: 1.0,
+        life: 0.8,
         isShockwave: true,
       } as any);
     }
@@ -3146,244 +3379,7 @@ export default class HelixScene extends Phaser.Scene {
     // Haptic feedback on death
     this.triggerHapticFeedback();
 
-    // Show try-again overlay or go straight to game over
-    if (!this.tryAgainUsed) {
-      this.showTryAgainOverlay();
-    } else {
-      this.saveHighScoreAndGameOver();
-    }
-  }
-
-  private showTryAgainOverlay() {
-    const { width, height } = this.scale.gameSize;
-
-    // Semi-transparent dark overlay
-    const overlay = this.add.graphics();
-    overlay.fillStyle(0x000000, 0.75);
-    overlay.fillRect(0, 0, width, height);
-    overlay.setDepth(300);
-    this.tryAgainUIElements.push(overlay);
-
-    // "WANNA TRY AGAIN?" title
-    const title = this.add
-      .text(width / 2, height * 0.32, "WANNA TRY\nAGAIN?", {
-        fontSize: "72px",
-        color: "#FFFFFF",
-        fontFamily: "Fredoka",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 10,
-        align: "center",
-      })
-      .setOrigin(0.5)
-      .setDepth(301);
-    this.tryAgainUIElements.push(title);
-
-    // Current score display
-    const scoreLabel = this.add
-      .text(width / 2, height * 0.48, `SCORE: ${this.score}`, {
-        fontSize: "40px",
-        color: "#FFD93D",
-        fontFamily: "Fredoka",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 6,
-      })
-      .setOrigin(0.5)
-      .setDepth(301);
-    this.tryAgainUIElements.push(scoreLabel);
-
-    // --- TRY AGAIN button ---
-    const btnW = 320;
-    const btnH = 70;
-    const tryBtnY = height * 0.58;
-
-    const tryBtnBg = this.add.graphics();
-    tryBtnBg.fillStyle(0x2ecc71, 1);
-    tryBtnBg.fillRoundedRect(
-      width / 2 - btnW / 2,
-      tryBtnY - btnH / 2,
-      btnW,
-      btnH,
-      18,
-    );
-    tryBtnBg.lineStyle(3, 0x000000, 1);
-    tryBtnBg.strokeRoundedRect(
-      width / 2 - btnW / 2,
-      tryBtnY - btnH / 2,
-      btnW,
-      btnH,
-      18,
-    );
-    tryBtnBg.setDepth(301);
-    this.tryAgainUIElements.push(tryBtnBg);
-
-    const tryBtnText = this.add
-      .text(width / 2, tryBtnY, "\u25B6  TRY AGAIN", {
-        fontSize: "36px",
-        color: "#FFFFFF",
-        fontFamily: "Fredoka",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 4,
-      })
-      .setOrigin(0.5)
-      .setDepth(302);
-    this.tryAgainUIElements.push(tryBtnText);
-
-    const tryBtnZone = this.add
-      .zone(width / 2, tryBtnY, btnW, btnH)
-      .setInteractive({ useHandCursor: true })
-      .setDepth(303);
-    tryBtnZone.on("pointerdown", () => this.handleTryAgainPurchase());
-    tryBtnZone.on("pointerover", () => tryBtnBg.setAlpha(0.85));
-    tryBtnZone.on("pointerout", () => tryBtnBg.setAlpha(1));
-    this.tryAgainUIElements.push(tryBtnZone);
-
-    // --- GAME OVER button ---
-    const goBtnY = height * 0.68;
-
-    const goBtnBg = this.add.graphics();
-    goBtnBg.fillStyle(0x333333, 1);
-    goBtnBg.fillRoundedRect(
-      width / 2 - btnW / 2,
-      goBtnY - btnH / 2,
-      btnW,
-      btnH,
-      18,
-    );
-    goBtnBg.lineStyle(3, 0x000000, 1);
-    goBtnBg.strokeRoundedRect(
-      width / 2 - btnW / 2,
-      goBtnY - btnH / 2,
-      btnW,
-      btnH,
-      18,
-    );
-    goBtnBg.setDepth(301);
-    this.tryAgainUIElements.push(goBtnBg);
-
-    const goBtnText = this.add
-      .text(width / 2, goBtnY, "GAME OVER", {
-        fontSize: "36px",
-        color: "#AAAAAA",
-        fontFamily: "Fredoka",
-        fontStyle: "bold",
-        stroke: "#000000",
-        strokeThickness: 4,
-      })
-      .setOrigin(0.5)
-      .setDepth(302);
-    this.tryAgainUIElements.push(goBtnText);
-
-    const goBtnZone = this.add
-      .zone(width / 2, goBtnY, btnW, btnH)
-      .setInteractive({ useHandCursor: true })
-      .setDepth(303);
-    goBtnZone.on("pointerdown", () => {
-      this.destroyTryAgainUI();
-      this.saveHighScoreAndGameOver();
-    });
-    goBtnZone.on("pointerover", () => goBtnBg.setAlpha(0.85));
-    goBtnZone.on("pointerout", () => goBtnBg.setAlpha(1));
-    this.tryAgainUIElements.push(goBtnZone);
-
-    // Entrance animation
-    title.setAlpha(0).setScale(0.8);
-    this.tweens.add({
-      targets: title,
-      alpha: 1,
-      scale: 1,
-      duration: 400,
-      ease: "Back.easeOut",
-    });
-    scoreLabel.setAlpha(0);
-    this.tweens.add({
-      targets: scoreLabel,
-      alpha: 1,
-      duration: 300,
-      delay: 150,
-    });
-    tryBtnBg.setAlpha(0);
-    tryBtnText.setAlpha(0);
-    this.tweens.add({
-      targets: [tryBtnBg, tryBtnText],
-      alpha: 1,
-      duration: 300,
-      delay: 300,
-    });
-    goBtnBg.setAlpha(0);
-    goBtnText.setAlpha(0);
-    this.tweens.add({
-      targets: [goBtnBg, goBtnText],
-      alpha: 1,
-      duration: 300,
-      delay: 400,
-    });
-  }
-
-  private async handleTryAgainPurchase() {
-    const sdk = (window as any).FarcadeSDK;
-    if (!sdk) {
-      this.destroyTryAgainUI();
-      this.saveHighScoreAndGameOver();
-      return;
-    }
-
-    try {
-      const result = await sdk.purchase({ item: "try-again" });
-      if (result && result.success) {
-        this.tryAgainUsed = true;
-        this.destroyTryAgainUI();
-        this.revivePlayer();
-      } else {
-        // Purchase cancelled/failed — stay on the overlay
-      }
-    } catch (e) {
-      console.log("Try-again purchase failed:", e);
-    }
-  }
-
-  private revivePlayer() {
-    // Reset ball above camera position
-    this.ball.scale.set(1, 1, 1);
-    this.ball.position.y = this.camera.position.y + 2;
-    this.ball.position.x = 0;
-    this.ball.position.z = 2.5;
-    this.ballVelocity = 0;
-
-    // Reapply ball style
-    this.applyBallStyle(this.testRank);
-
-    // Re-activate game
-    this.isGameActive = true;
-    this.scoreContainer.setVisible(true);
-
-    // Activate shield with visual bubble
-    this.activateShield();
-    this.shieldTimer = 5000; // 5 seconds of shield on revive
-
-    // Flash effect on revive
-    const { width, height } = this.scale.gameSize;
-    const flash = this.add.graphics();
-    flash.fillStyle(0xffffff, 0.6);
-    flash.fillRect(0, 0, width, height);
-    flash.setDepth(400);
-    this.tweens.add({
-      targets: flash,
-      alpha: 0,
-      duration: 500,
-      onComplete: () => flash.destroy(),
-    });
-
-    this.triggerHapticFeedback();
-  }
-
-  private destroyTryAgainUI() {
-    this.tryAgainUIElements.forEach((el) => {
-      if (el && el.destroy) el.destroy();
-    });
-    this.tryAgainUIElements = [];
+    this.saveHighScoreAndGameOver();
   }
 
   async saveHighScoreAndGameOver() {
@@ -3405,8 +3401,8 @@ export default class HelixScene extends Phaser.Scene {
   destroyPlatform(platform: THREE.Mesh, index: number) {
     const yPos = platform.position.y;
 
-    // Doodle style ring - thick black outline
-    const ringGeo = new THREE.RingGeometry(1.8, 2.2, 24);
+    // Shockwave ring
+    const ringGeo = new THREE.RingGeometry(1.8, 2.2, 16);
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
       transparent: true,
@@ -3422,7 +3418,7 @@ export default class HelixScene extends Phaser.Scene {
       velocity: new THREE.Vector3(0, 0, 0),
       life: 0.5,
       isShockwave: true,
-    } as any); // Shorter life
+    } as any);
 
     // Remove any power-up on this platform
     for (let i = this.powerUps.length - 1; i >= 0; i--) {
@@ -3490,46 +3486,148 @@ export default class HelixScene extends Phaser.Scene {
     return "hit";
   }
 
-  resolveCombo() {
+  resolveCombo(suppressText = false) {
     if (this.comboCount > 1) {
-      const bonus = this.comboCount * 2;
+      // Quadratic scoring: combo of 5 = +25pts, combo of 10 = +100pts
+      const bonus = this.comboCount * this.comboCount;
       this.score += bonus;
       this.scoreText.setText(this.score.toString());
-      this.showComboText();
+      if (!suppressText) this.showComboText(this.comboCount);
     }
     this.comboCount = 0;
+    // Hide live streak display
+    if (this.comboStreakText) {
+      this.tweens.killTweensOf(this.comboStreakText);
+      this.comboStreakText.setVisible(false);
+    }
   }
 
-  showComboText() {
-    const words = ["AWESOME!", "WICKED!", "SAVAGE!", "INSANE!", "LEGENDARY!"];
-    const colors = ["#2ecc71", "#e91e8c", "#ffd93d", "#1abc9c", "#e74c3c"];
-    const wordIndex = Math.floor(Math.random() * words.length);
-    const word = words[wordIndex];
-    const color = colors[wordIndex];
+  showComboText(count: number) {
+    // Cyberpunk neon palette — each tier has a distinct neon hue
+    let word: string;
+    let mainColor: string;
+    let subColor: string;
+    let fontSize: string;
 
-    const text = this.add
-      .text(this.scale.width / 2, this.scale.height / 2 - 100, word, {
-        fontSize: "72px",
-        color: color,
+    if (count >= 10) {
+      word = "GODLIKE!";
+      mainColor = "#00ffff"; // Electric cyan
+      subColor = "#88ffff";
+      fontSize = "96px";
+    } else if (count >= 7) {
+      word = "LEGENDARY!";
+      mainColor = "#ff00ff"; // Neon magenta
+      subColor = "#ff88ff";
+      fontSize = "88px";
+    } else if (count >= 5) {
+      word = "INSANE!";
+      mainColor = "#ff0066"; // Hot pink
+      subColor = "#ff66aa";
+      fontSize = "84px";
+    } else if (count >= 4) {
+      word = "SAVAGE!";
+      mainColor = "#ffff00"; // Electric yellow
+      subColor = "#ffffaa";
+      fontSize = "80px";
+    } else if (count >= 3) {
+      word = "WICKED!";
+      mainColor = "#ff6600"; // Neon orange
+      subColor = "#ffaa66";
+      fontSize = "76px";
+    } else {
+      word = "NICE!";
+      mainColor = "#00ff99"; // Neon mint
+      subColor = "#88ffcc";
+      fontSize = "68px";
+    }
+
+    const cx = this.scale.width / 2;
+    const cy = this.scale.height / 2 - 90;
+
+    // Main word
+    const mainText = this.add
+      .text(cx, cy, word, {
+        fontSize,
+        color: mainColor,
         fontFamily: "Fredoka",
         fontStyle: "bold",
         stroke: "#000000",
-        strokeThickness: 10,
+        strokeThickness: 12,
+        shadow: {
+          offsetX: 0,
+          offsetY: 0,
+          color: mainColor,
+          blur: 18,
+          fill: true,
+        },
       })
       .setOrigin(0.5)
-      .setDepth(150);
+      .setDepth(151)
+      .setAlpha(0)
+      .setScale(0.4);
 
+    // Sub-label: ×N COMBO
+    const subText = this.add
+      .text(cx, cy + 72, `×${count} COMBO`, {
+        fontSize: "46px",
+        color: subColor,
+        fontFamily: "Fredoka",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 8,
+      })
+      .setOrigin(0.5)
+      .setDepth(151)
+      .setAlpha(0);
+
+    // Pop-in
     this.tweens.add({
-      targets: text,
-      y: text.y - 100,
-      alpha: 0,
-      scale: 1.5,
-      duration: 1000,
-      ease: "Power2",
-      onComplete: () => text.destroy(),
+      targets: mainText,
+      alpha: 1,
+      scale: count >= 7 ? 1.1 : 1.0,
+      duration: 200,
+      ease: "Back.easeOut",
+      onComplete: () => {
+        if (count >= 7) {
+          this.tweens.add({
+            targets: mainText,
+            x: { from: cx - 10, to: cx + 10 },
+            duration: 50,
+            yoyo: true,
+            repeat: 3,
+          });
+        }
+        this.time.delayedCall(700, () => {
+          this.tweens.add({
+            targets: mainText,
+            y: cy - 80,
+            alpha: 0,
+            duration: 450,
+            ease: "Power2",
+            onComplete: () => mainText.destroy(),
+          });
+        });
+      },
     });
 
-    // Haptic feedback on combo
+    this.tweens.add({
+      targets: subText,
+      alpha: 1,
+      duration: 180,
+      delay: 100,
+      ease: "Power2",
+    });
+    this.time.delayedCall(820, () => {
+      this.tweens.add({
+        targets: subText,
+        alpha: 0,
+        y: `-=${50}`,
+        duration: 380,
+        ease: "Power2",
+        onComplete: () => subText.destroy(),
+      });
+    });
+
     this.triggerHapticFeedback();
   }
 
@@ -3538,12 +3636,12 @@ export default class HelixScene extends Phaser.Scene {
     if (!sdk) return;
 
     // Handle play again requests from the platform
-    sdk.onPlayAgain(() => {
+    sdk.on("play_again", () => {
       this.restartGame();
     });
 
     // Handle mute/unmute from the platform
-    sdk.onToggleMute((data: { isMuted: boolean }) => {
+    sdk.on("toggle_mute", (data: { isMuted: boolean }) => {
       this.sound.mute = data.isMuted;
     });
   }
@@ -3553,7 +3651,7 @@ export default class HelixScene extends Phaser.Scene {
     try {
       const sdk = (window as any).FarcadeSDK;
       if (sdk) {
-        sdk.hapticFeedback();
+        sdk.singlePlayer.actions.hapticFeedback();
       }
     } catch (e) {
       // Fallback to native vibration API
@@ -3561,6 +3659,389 @@ export default class HelixScene extends Phaser.Scene {
     if (navigator.vibrate) {
       navigator.vibrate(50);
     }
+  }
+
+  // ─────────────────────────────────────────────
+  // BOSS PLATFORM
+  // ─────────────────────────────────────────────
+
+  /** Creates a full-ring challenge platform with target gems and danger arcs. */
+  private createBossPlatformMesh(yPos: number): THREE.Mesh {
+    const innerRadius = 2;
+    const outerRadius = 4;
+    const pt = this.platformThickness;
+
+    // Near-complete arc (0.001 rad gap = ~0.057°, visually invisible)
+    const shape = new THREE.Shape();
+    const start = 0.001;
+    const end = Math.PI * 2;
+    shape.moveTo(innerRadius * Math.cos(start), innerRadius * Math.sin(start));
+    shape.lineTo(outerRadius * Math.cos(start), outerRadius * Math.sin(start));
+    shape.absarc(0, 0, outerRadius, start, end, false);
+    shape.lineTo(innerRadius * Math.cos(end), innerRadius * Math.sin(end));
+    shape.absarc(0, 0, innerRadius, end, start, true);
+
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: pt,
+      bevelEnabled: false,
+    });
+    const baseMat = new THREE.MeshBasicMaterial({ color: 0x0d0d2a }); // Dark navy
+    const platform = new THREE.Mesh(geo, baseMat);
+    platform.rotation.x = -Math.PI / 2;
+    const rotZ = Math.random() * Math.PI * 2;
+    platform.rotation.z = rotZ;
+    platform.position.y = yPos;
+
+    // Black outline
+    const outlineGeo = geo.clone();
+    const outlineMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      side: THREE.BackSide,
+    });
+    const outline = new THREE.Mesh(outlineGeo, outlineMat);
+    outline.scale.set(1.03, 1.03, 1.15);
+    platform.add(outline);
+
+    // ── Zone layout per sector: [safe | danger | safe | target] ──
+    const numTargets = Math.random() < 0.5 ? 3 : 4;
+    const sectorSize = (Math.PI * 2) / numTargets;
+    const targetArcSize = Math.PI / 5; // 36°
+    const dangerArcSize = Math.PI / 6; // 30°
+    const safeHalf = (sectorSize - targetArcSize - dangerArcSize) / 2;
+    const baseOffset = Math.random() * sectorSize;
+
+    const bossTargets: Array<{
+      start: number;
+      size: number;
+      destroyed: boolean;
+      arcMesh: THREE.Mesh | null;
+      indicatorMesh: THREE.Mesh | null;
+      phaseOffset: number;
+    }> = [];
+    const bossDangerZones: Array<{ start: number; size: number }> = [];
+
+    for (let t = 0; t < numTargets; t++) {
+      const sectorStart = baseOffset + t * sectorSize;
+
+      // ── Danger zone ──
+      const dangerStart = sectorStart + safeHalf;
+      const dEnd = dangerStart + dangerArcSize;
+      const dangerShape = new THREE.Shape();
+      dangerShape.moveTo(
+        innerRadius * Math.cos(dangerStart),
+        innerRadius * Math.sin(dangerStart),
+      );
+      dangerShape.lineTo(
+        outerRadius * Math.cos(dangerStart),
+        outerRadius * Math.sin(dangerStart),
+      );
+      dangerShape.absarc(0, 0, outerRadius, dangerStart, dEnd, false);
+      dangerShape.lineTo(
+        innerRadius * Math.cos(dEnd),
+        innerRadius * Math.sin(dEnd),
+      );
+      dangerShape.absarc(0, 0, innerRadius, dEnd, dangerStart, true);
+      const dangerGeo = new THREE.ExtrudeGeometry(dangerShape, {
+        depth: pt + 0.08,
+        bevelEnabled: false,
+      });
+      platform.add(
+        new THREE.Mesh(
+          dangerGeo,
+          new THREE.MeshBasicMaterial({ color: 0xff0033 }),
+        ),
+      );
+      bossDangerZones.push({ start: dangerStart, size: dangerArcSize });
+
+      // ── Target zone ──
+      const targetStart = dangerStart + dangerArcSize + safeHalf;
+      const tEnd = targetStart + targetArcSize;
+      const targetShape = new THREE.Shape();
+      targetShape.moveTo(
+        innerRadius * Math.cos(targetStart),
+        innerRadius * Math.sin(targetStart),
+      );
+      targetShape.lineTo(
+        outerRadius * Math.cos(targetStart),
+        outerRadius * Math.sin(targetStart),
+      );
+      targetShape.absarc(0, 0, outerRadius, targetStart, tEnd, false);
+      targetShape.lineTo(
+        innerRadius * Math.cos(tEnd),
+        innerRadius * Math.sin(tEnd),
+      );
+      targetShape.absarc(0, 0, innerRadius, tEnd, targetStart, true);
+      const targetGeo = new THREE.ExtrudeGeometry(targetShape, {
+        depth: pt + 0.12,
+        bevelEnabled: false,
+      });
+      const targetMat = new THREE.MeshBasicMaterial({
+        color: 0xffd700,
+        transparent: true,
+        opacity: 0.9,
+      });
+      const targetMesh = new THREE.Mesh(targetGeo, targetMat);
+      platform.add(targetMesh);
+
+      // ── Gem indicator floating above target center ──
+      const gemAngle = targetStart + targetArcSize / 2;
+      const gemRadius = (innerRadius + outerRadius) / 2; // = 3
+      const gemGeo = new THREE.OctahedronGeometry(0.32);
+      const gemMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+      const gem = new THREE.Mesh(gemGeo, gemMat);
+      gem.position.set(
+        Math.cos(gemAngle) * gemRadius,
+        Math.sin(gemAngle) * gemRadius,
+        pt + 0.7,
+      );
+      const gemOutline = new THREE.Mesh(
+        gemGeo,
+        new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide }),
+      );
+      gemOutline.scale.set(1.25, 1.25, 1.25);
+      gem.add(gemOutline);
+      platform.add(gem);
+
+      bossTargets.push({
+        start: targetStart,
+        size: targetArcSize,
+        destroyed: false,
+        arcMesh: targetMesh,
+        indicatorMesh: gem,
+        phaseOffset: (t / numTargets) * Math.PI * 2,
+      });
+    }
+
+    // ── Golden outer glow ring ──
+    const glowRingGeo = new THREE.TorusGeometry(
+      outerRadius + 0.15,
+      0.12,
+      4,
+      32,
+    );
+    const glowRingMat = new THREE.MeshBasicMaterial({
+      color: 0xffd700,
+      transparent: true,
+      opacity: 0.5,
+    });
+    const glowRing = new THREE.Mesh(glowRingGeo, glowRingMat);
+    glowRing.position.z = pt / 2;
+    platform.add(glowRing);
+
+    platform.userData = {
+      isBase: false,
+      isBossPlatform: true,
+      gaps: [{ start: 0, end: 0.001, size: 0.001, center: 0.0005 }],
+      dangerZones: [],
+      rotationOffset: rotZ,
+      id: this.platformIdCounter,
+      isMoving: false,
+      moveSpeed: 0,
+      isBlinking: false,
+      bossTargets,
+      bossDangerZones,
+      remainingTargets: numTargets,
+      totalTargets: numTargets,
+      bossTime: 0,
+      glowRingMesh: glowRing,
+    };
+
+    return platform;
+  }
+
+  /** Returns whether ball angle hits a target, danger zone, or safe area on a boss platform. */
+  private checkBossCollision(platform: THREE.Mesh): {
+    type: "target" | "danger" | "safe";
+    targetIndex: number;
+  } {
+    let ballAngle =
+      (Math.PI / 2 - this.tower.rotation.y + Math.PI) % (Math.PI * 2);
+    if (ballAngle < 0) ballAngle += Math.PI * 2;
+    const rot = platform.userData.rotationOffset;
+
+    // Check targets first (priority over danger)
+    const targets = platform.userData.bossTargets;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      if (t.destroyed) continue;
+      let center = (t.start + t.size / 2 + rot) % (Math.PI * 2);
+      if (center < 0) center += Math.PI * 2;
+      let diff = Math.abs(ballAngle - center);
+      if (diff > Math.PI) diff = Math.PI * 2 - diff;
+      if (diff < t.size / 2) return { type: "target", targetIndex: i };
+    }
+
+    // Check danger zones
+    for (const d of platform.userData.bossDangerZones) {
+      let center = (d.start + d.size / 2 + rot) % (Math.PI * 2);
+      if (center < 0) center += Math.PI * 2;
+      let diff = Math.abs(ballAngle - center);
+      if (diff > Math.PI) diff = Math.PI * 2 - diff;
+      if (diff < d.size / 2) return { type: "danger", targetIndex: -1 };
+    }
+
+    return { type: "safe", targetIndex: -1 };
+  }
+
+  /** Called when the ball successfully hits a target gem on a boss platform. */
+  private hitBossTarget(
+    platform: THREE.Mesh,
+    targetIndex: number,
+    platformIndex: number,
+    topSurfaceY: number,
+  ) {
+    const bossData = platform.userData;
+    const target = bossData.bossTargets[targetIndex];
+
+    target.destroyed = true;
+    bossData.remainingTargets--;
+
+    // Remove visuals for this target
+    if (target.arcMesh) platform.remove(target.arcMesh);
+    if (target.indicatorMesh) platform.remove(target.indicatorMesh);
+
+    this.createExplosion(platform.position.y + 0.5, 0xffd700, 8);
+    this.playSmashSound();
+    this.comboCount++;
+    this.updateComboStreak(this.comboCount);
+
+    if (bossData.remainingTargets <= 0) {
+      // All gems hit — destroy platform with big reward
+      const bonus = bossData.totalTargets * 15;
+      this.score += bonus;
+      this.scoreText.setText(this.score.toString());
+      this.createExplosion(platform.position.y, 0xffd700, 18, true);
+      this.createExplosion(platform.position.y, 0xffffff, 10, true);
+      this.destroyPlatform(platform, platformIndex);
+      this.showBossDestroyedText();
+      this.resolveCombo(true); // suppress combo text — BOSS SMASHED! already shown
+      this.triggerHapticFeedback();
+      // Always bounce after boss destroy so ball doesn't get stuck
+      this.ballVelocity = this.isChaosMode
+        ? this.chaosJumpStrength
+        : this.jumpStrength;
+      this.ball.position.y = topSurfaceY;
+    } else {
+      // Still gems remaining — just bounce
+      this.ballVelocity = this.isChaosMode
+        ? this.chaosJumpStrength
+        : this.jumpStrength;
+      this.ball.position.y = topSurfaceY;
+      this.jumpSound?.play();
+    }
+  }
+
+  /** Full-screen "BOSS SMASHED!" celebration message. */
+  private showBossDestroyedText() {
+    const cx = this.scale.width / 2;
+    const cy = this.scale.height / 2 - 60;
+
+    const line1 = this.add
+      .text(cx, cy, "BOSS", {
+        fontSize: "112px",
+        color: "#ffd700",
+        fontFamily: "Fredoka",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 14,
+      })
+      .setOrigin(0.5)
+      .setDepth(155)
+      .setAlpha(0)
+      .setScale(0.3);
+
+    const line2 = this.add
+      .text(cx, cy + 100, "SMASHED!", {
+        fontSize: "80px",
+        color: "#ff8800",
+        fontFamily: "Fredoka",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 12,
+      })
+      .setOrigin(0.5)
+      .setDepth(155)
+      .setAlpha(0)
+      .setScale(0.3);
+
+    this.tweens.add({
+      targets: [line1, line2],
+      alpha: 1,
+      scale: 1.05,
+      duration: 200,
+      ease: "Back.easeOut",
+      onComplete: () => {
+        // Shake the top line
+        this.tweens.add({
+          targets: line1,
+          x: { from: cx - 12, to: cx + 12 },
+          duration: 60,
+          yoyo: true,
+          repeat: 4,
+        });
+        this.time.delayedCall(650, () => {
+          this.tweens.add({
+            targets: [line1, line2],
+            y: "-=80",
+            alpha: 0,
+            duration: 500,
+            ease: "Power2",
+            onComplete: () => {
+              line1.destroy();
+              line2.destroy();
+            },
+          });
+        });
+      },
+    });
+  }
+
+  // ─────────────────────────────────────────────
+  // COMBO STREAK
+  // ─────────────────────────────────────────────
+
+  /** Shows/updates the live combo streak counter while the streak is building. */
+  private updateComboStreak(count: number) {
+    if (count < 2) return;
+
+    if (!this.comboStreakText) {
+      this.comboStreakText = this.add
+        .text(this.scale.width / 2, this.scale.height * 0.72, "", {
+          fontSize: "52px",
+          color: "#ffd700",
+          fontFamily: "Fredoka",
+          fontStyle: "bold",
+          stroke: "#000000",
+          strokeThickness: 8,
+        })
+        .setOrigin(0.5)
+        .setDepth(145);
+    }
+
+    // Pick colour based on streak size
+    const streakColor =
+      count >= 10
+        ? "#ff00ff"
+        : count >= 7
+          ? "#ff6600"
+          : count >= 5
+            ? "#ff3300"
+            : count >= 3
+              ? "#ffd700"
+              : "#2ecc71";
+
+    this.comboStreakText.setColor(streakColor);
+    this.comboStreakText.setText(`STREAK ×${count}`);
+    this.comboStreakText.setVisible(true);
+    this.comboStreakText.setAlpha(1);
+
+    this.tweens.killTweensOf(this.comboStreakText);
+    this.tweens.add({
+      targets: this.comboStreakText,
+      scale: { from: 1.35, to: 1.0 },
+      duration: 200,
+      ease: "Back.easeOut",
+    });
   }
 
   createStars() {
